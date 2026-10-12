@@ -1,0 +1,94 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  buildConfiguration: 'Release'
+  azureSubscription: 'MyAzureConnection' # Replace with your Azure Service Connection name
+  appServiceName: 'API-secret'                 # Replace with your target Azure App Service name
+
+stages:
+- stage: BuildAndScan
+  displayName: 'Build, Test, and Vulnerability Scan'
+  jobs:
+  - job: SecurityAndBuild
+    displayName: 'Analyze and Build'
+    steps:
+    
+    # 1. Install .NET SDK (Matching your .NET 10 environment)
+    - task: UseDotNet@2
+      displayName: 'Install .NET SDK'
+      inputs:
+        packageType: 'sdk'
+        version: '10.x'
+
+    # 2. Restore NuGet Packages
+    - task: DotNetCoreCLI@2
+      displayName: 'Restore Packages'
+      inputs:
+        command: 'restore'
+        projects: '**/*.csproj'
+
+    # 3. Vulnerability Scan (Checks NuGet packages for known security flaws)
+    - script: |
+        echo "Running security vulnerability check on NuGet packages..."
+        dotnet list KeyVaultApi.csproj package --vulnerable --include-transitive
+      displayName: 'Scan NuGet Vulnerabilities'
+
+    # 4. Build the App
+    - task: DotNetCoreCLI@2
+      displayName: 'Build Application'
+      inputs:
+        command: 'build'
+        projects: '**/*.csproj'
+        arguments: '--configuration $(buildConfiguration) --no-restore'
+
+    # 5. Run Unit Tests (Optional placeholder if you add test projects later)
+    - task: DotNetCoreCLI@2
+      displayName: 'Run Tests'
+      inputs:
+        command: 'test'
+        projects: '**/*Tests/*.csproj' # Matches any test projects if created
+        arguments: '--configuration $(buildConfiguration) --no-build'
+      continueOnError: true # Prevents pipeline failure if no test project exists yet
+
+    # 6. Publish Application for Deployment
+    - task: DotNetCoreCLI@2
+      displayName: 'Publish App'
+      inputs:
+        command: 'publish'
+        publishWebProjects: true
+        arguments: '--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)/drop --no-build'
+        zipAfterPublish: true
+
+    # 7. Upload Build Artifact
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Artifact Drop'
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)/drop'
+        ArtifactName: 'drop'
+        publishLocation: 'Container'
+
+- stage: Deploy
+  displayName: 'Deploy to Azure App Service'
+  dependsOn: BuildAndScan
+  condition: succeeded()
+  jobs:
+  - deployment: DeployAppService
+    displayName: 'Deployment Job'
+    environment: 'production'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureWebApp@1
+            displayName: 'Azure App Service Deploy'
+            inputs:
+              azureSubscription: '$(azureSubscription)'
+              appType: 'webAppLinux'
+              appName: '$(appServiceName)'
+              package: '$(Pipeline.Workspace)/drop/**/*.zip'
